@@ -1,0 +1,286 @@
+# Testing Standards
+
+Authoritative rules for tests in this codebase (Vitest + Supertest for unit/integration;
+Express + Drizzle/Neon services, React client). Every rule has a stable ID
+(`TST.*`) so `/smell`, `/test`, and `/doc-drift` can reference it. This file owns `TST.*`.
+
+Scope: **what to test, how to test it, and when a test is mandatory.** *Which* roles/tiers may
+call a route is not decided here — that's `access-control.md` (canonical); this file says how to
+prove the code matches it. Server architecture rules live in `express.md`, React rules in
+`react.md`, TypeScript language rules in `typescript.md`.
+
+> Format: one directive + a tiny good/bad. Prettier owns formatting. This file is the **rules**;
+> the `/test` command is the **procedure** that applies them to a diff. When the two disagree,
+> this file wins. Likewise, when the `/tdd` skill and this file disagree on a **layer-specific**
+> question (what to assert, where to verify, what counts as a seam at a given layer), this file's
+> `TST.*` rules win — the skill governs the red → green loop, not the layer rules.
+
+---
+
+## Test layers & runners
+
+The app already runs tests at several layers — this table is the canonical map so no one again
+assumes a layer is missing. Test each unit where its logic lives; don't push a service assertion
+up into an HTTP test or a pure-function assertion down into a render test.
+
+| Layer | Model file | Runner | Env | DB |
+|---|---|---|---|---|
+| Pure function / formatter | `orderTransactions.test.ts` | `npm run test` | node | none |
+| Zod validator | *(to add)* `validation/*.test.ts` | `npm run test` | node | none |
+| Middleware guard | `requireRole.test.ts` (mocks `server/storage`) | `npm run test` | node | none |
+| Service (pure-enough) | `tokens.services.test.ts` | `npm run test` | node | mocked |
+| Lib | `realEstatePreview.test.ts` | `npm run test` | node | none |
+| WebSocket | `auth.test.ts`, `registry.test.ts` | `npm run test` | node | mocked |
+| Client pure logic | `mastermind-messages.test.ts` (`mergeMessages`) | `npm run test` | node | none |
+| Route / service (integration) | `tests/server/api/**/*.integration.test.ts` | `npm run test:integration` | node | real local Postgres (Docker / CI service) |
+| Component / hook | *(to add)* `tests/client/**` | `npm run test` (jsdom project) | jsdom | none |
+
+- **TST.LAYER-MAP** — A function that touches `db` is an **integration** test; a pure function is
+  a fast **unit** test with no HTTP and no DB; anything that renders JSX or calls a hook is a
+  **jsdom** test. Don't blur these.
+- **TST.ONE-LAYER** — Each behavior is asserted at exactly **one** layer — the cheapest layer that
+  can catch its regression. Don't re-prove the same rule at schema-unit, route-integration, and
+  component level. If the Zod unit test proves "undisclosed address requires a county," the
+  route's integration validation coverage proves the **wiring** (one representative `400`), not
+  the full field matrix again.
+```ts
+  // Bad — same rule asserted three times across layers
+  // unit:        dealFormSchema rejects undisclosed without county
+  // integration: POST /api/deals rejects undisclosed without county (+ 6 more field cases)
+  // component:   DealForm shows error for undisclosed without county
+  // Good — unit owns the rule; integration proves the schema is wired (one 400); component
+  // tests only its own behavior (error rendering), not the rule itself
+```
+
+---
+
+## Coverage policy
+
+- **TST.BEHAVIOR-FIRST** — Chase **behavior** coverage, not a line percentage: every meaningful
+  path of a new feature gets a test that asserts an outcome. A measured line % (see Running) is a
+  backstop, never the target.
+- **TST.ASSERT-OUTCOME** — Every `it()` ends in an `expect`. A test that runs code but asserts
+  nothing is false confidence plus maintenance cost — finish it or delete it.
+```ts
+  // Bad — executes the path, proves nothing
+  it("creates a deal", async () => { await createDeal(input); });
+  // Good
+  it("creates a deal", async () => {
+      const deal = await createDeal(input);
+      expect(deal.id).toBeDefined();
+  });
+```
+- **TST.NO-TRIVIAL** — Don't write dedicated tests for logic-free wiring: thin controllers that
+  only `req → service → res`, generated Drizzle row types, presentational-only components, or
+  validators with no custom logic beyond field types (see TST.UNIT-ZOD). They're covered
+  incidentally; a bespoke test there is noise.
+
+---
+
+## Mandatory defaults
+
+- **TST.MANDATORY** — These ship with every applicable change, no exceptions, because they're
+  cheap, deterministic, and need no running app:
+  1. a **Zod unit test** when you add/change a validator in `database/validation` (or an
+     insert/update schema) **that carries custom logic** (see TST.UNIT-ZOD — a plain field-type
+     schema needs none);
+  2. a **unit test** when you add a pure util/formatter in `shared/utils`, `server/utils`, or
+     `client/src/lib`;
+  3. a **middleware unit test** when you add a new guard;
+  4. the **integration role + validation baseline** when you add a route.
+- **TST.WHEN-APPLICABLE** — These are required only when the code carries the matching risk — not
+  on every change — so the policy stays enforceable instead of getting routed around:
+  - **service business/ownership/state** integration tests → when the route has an ownership check
+    or a state transition (deals, offers, claims), **not** for plain CRUD;
+  - **error-path** tests → when the code calls a fallible downstream or maps a conflict;
+  - **component/hook** tests → for a new **shared or complex** component/hook, not a presentational
+    tweak.
+```ts
+  // Bad policy reading: a one-line label change must add component + error-path tests
+  // Good: a presentational tweak adds nothing; a new ownership-gated route adds ownership + state
+```
+- **TST.ASK-IF-UNKNOWN** — If a new route's access rules aren't yet in `access-control.md`, **ask
+  before generating** its access tests. Never guess the policy into existence.
+
+---
+
+## Unit tests (`npm run test` — node env, no DB)
+
+- **TST.UNIT-PURE** — Pure functions get exhaustive unit tests over their branches and
+  boundaries. Model: `orderTransactions.test.ts`. Reach for `it.each` for tabular cases.
+- **TST.UNIT-ZOD** — Test a validator's **custom** logic only: refinements, cross-field rules
+  (undisclosed address → county required), transforms, boundary values on `.min()`/`.max()`,
+  regression guards for removed/renamed fields, plus one representative accept case. Do **not**
+  test that `z.string()` rejects a number, that a missing required field fails, or any other
+  guarantee Zod itself provides — that's testing the library, not the schema. A schema with no
+  custom logic beyond field types needs no dedicated test (TST.NO-TRIVIAL).
+```ts
+  // Bad — proves Zod works, not the schema
+  it("rejects a non-string county", () => {
+      expect(dealFormSchema.safeParse({ ...valid, county: 42 }).success).toBe(false);
+  });
+  // Good — proves OUR cross-field rule
+  it("dealFormSchema — undisclosed address without county — rejected", () => {
+      expect(dealFormSchema.safeParse({ ...undisclosed, county: undefined }).success).toBe(false);
+  });
+```
+- **TST.UNIT-MIDDLEWARE** — Each guard (`requireAuth`/`requireAccess`/`requireRole`/`requireSub`/
+  `requireMastermind`) gets a unit test that mocks `server/storage` and asserts the 401/403/`next()`
+  outcomes in isolation. Model: `requireRole.test.ts`.
+- **TST.UNIT-SERVICE** — Service logic that can run without a real DB is unit-tested with the data
+  layer mocked; reserve the real database for integration. Model: `tokens.services.test.ts`.
+- **TST.UNIT-FORMATTER** — A formatter that backs a project rule gets a test that locks the rule —
+  `formatCompanyName` (pins `ARV.RAW-COMPANY-NAME`), `formatPhoneNumber`, `formatAddress`.
+
+---
+
+## Integration tests (`npm run test:integration` — real local Postgres)
+
+Locally: `docker compose up -d` once per boot (Postgres 16 on `5432`, no volume), with
+`TEST_DATABASE_URL=postgres://test:test@localhost:5432/test` in `.env.test`. CI uses an identical
+service container. Every run starts from a pristine database — `scripts/reset-test-db.ts` drops
+the schema (loopback hosts only), `db:migrate:test` rebuilds it from the branch's migrations, and
+`db:seed:test` fills the lookup tables (roles, subscriptions, …) that tests resolve by name.
+
+- **TST.INT-ACCESS** — Generate access tests from the route's row in `access-control.md` per its
+  §6 recipe: each allowed role/tier → `2xx`; the boundary-blocked role → `403`; unauthenticated →
+  `401`; for `requireSub`, a bypass-role user with **no** subscription → `2xx`. Mock the
+  controller, run the **real** middleware.
+- **TST.INT-VALIDATION** — Prove the validator is **wired** to the route: one representative
+  invalid body → `400`, and assert the `{ message, errors }` shape once per resource so the
+  client form contract can't drift silently. The per-field rules themselves are owned by the Zod
+  unit layer (TST.UNIT-ZOD, TST.ONE-LAYER) — don't repeat the field matrix over HTTP.
+- **TST.INT-OWNERSHIP** — Ownership lives in the service (`express.md` EX.OWNERSHIP-IN-SERVICE),
+  so run the real service with seeded data: owner → ok, privileged role → ok, authenticated
+  non-owner → `403`. Respect the per-action asymmetries (RM may **delete** a deal but not **edit**
+  it; message edit is author-only even for an admin).
+- **TST.INT-STATE** — Assert the state change **persisted** by reading it back from the DB, not by
+  trusting the return value. At this layer the database **is** the seam — a read-back here is
+  verification through the real boundary, not the "side channel" the `/tdd` skill warns about
+  (that warning applies to unit tests bypassing their interface).
+```ts
+  // Good — proves it actually wrote
+  await submitOffer(input);
+  const rows = await db.select().from(dealBids).where(eq(dealBids.dealId, input.dealId));
+  expect(rows).toHaveLength(1);
+```
+- **TST.INT-ERROR** — For fallible downstreams and conflicts: `404` not-found; `409`
+  duplicate-key/illegal-transition (deleting a non-archived channel, re-reviewing a claim);
+  external failure mapped (OpenCorporates → `502`); a forced `500` returns a generic `{ message }`
+  with no stack or DB text (`EX.NO-LEAK-INTERNALS`).
+- **TST.INT-SIDE-EFFECT** — Assert fire-and-forget effects fired with the right inputs by reading
+  the **persisted result** (e.g. the `deal_bid` notification row for the poster), and that the
+  effect's failure does not fail the response (signup still `201` when the verification email
+  throws). Prefer testing the pure builder (companion-MSA merge, mention precedence) over racing
+  the microtask.
+- **TST.WEBSOCKET** — The Mastermind event protocol and the upgrade-auth handshake get tests at
+  the WS layer. Models: `auth.test.ts`, `registry.test.ts`.
+
+---
+
+## Frontend: component & hook (jsdom env)
+
+- **TST.CLIENT-ENV** — Tests that render JSX or call a hook run in the **jsdom** Vitest project
+  (kept separate from the node server-unit project so server units stay fast), with
+  `tests/client/setup.ts` wiring `@testing-library/jest-dom` matchers and auto-cleanup.
+- **TST.COMPONENT** — Component tests render the component, drive it with `user-event`, and assert
+  the rendered outcome — never internal state or implementation detail. Cover loading / empty /
+  populated and access-gated states (e.g. the locked feed panel when `!canAccessApp`). A
+  component whose whole behavior is one mapping (a badge, a status pill) is **one behavior** —
+  one `it.each` over the cases, not one `it` per case.
+- **TST.NO-CLASS-ASSERT** — Never assert Tailwind/CSS class names, inline styles, or DOM
+  structure that a styling refactor would change. Class-string assertions can't distinguish
+  "layout broke" from "layout was re-expressed" — any legitimate restyle breaks them with zero
+  behavior change. Component tests assert accessible roles, visible text, and callback behavior.
+  If a **visual** invariant genuinely matters (alignment, responsive layout, overflow), it
+  belongs in a Playwright visual/geometry check — or is accepted as manually verified — not in a
+  jsdom class assertion.
+```ts
+  // Bad — breaks on any restyle, proves nothing about behavior
+  expect(column).toHaveClass("lg:ml-[max(0px,calc(50%_-_28rem))]", "px-4", "md:px-6");
+  // Good — asserts what the user gets
+  expect(screen.getByRole("heading", { name: "123 Main St" })).toBeInTheDocument();
+```
+- **TST.HOOK** — Hooks are tested with `renderHook`. A provider-backed hook must throw when used
+  outside its Provider (`RX.PROVIDER-GUARD`); URL-state hooks assert URL ↔ state sync. Targets:
+  `useFilters`, `useDealsNav`, `useView`.
+- **TST.CLIENT-PURE** — Pure client logic lives in `tests/client/lib` and runs in node. Model:
+  `mastermind-messages.test.ts` (`mergeMessages`).
+
+---
+
+## Mocking & fixtures
+
+- **TST.MOCK-THE-EDGE** — Mock only the boundary you are **not** testing: external APIs (Postmark,
+  SFR, OpenCorporates), `lookupPropertyByAddress`, the WS registry, or `server/storage` for a
+  middleware unit. Never mock the unit under test.
+```ts
+  // Bad — mocking the service you're trying to prove
+  vi.mock("server/services/deals/deals.services.js");
+  // Good — mock only the external email side-effect
+  vi.mock("server/lib/postmark.js");
+```
+- **TST.REAL-GATE** — In access tests, mock the controller but let the **real** guard hit the test
+  branch, so a change to the gate breaks the test (otherwise the test can't regress).
+- **TST.SEED-OWN** — Each test seeds and tears down its own rows via `getTestDb()` / the helpers;
+  never rely on another test's leftover data.
+
+---
+
+## Conventions
+
+- **TST.LOCATION** — Mirror the source tree. Integration files end `.integration.test.ts`;
+  everything else is a unit test.
+```
+  tests/server/{api,middleware,services,utils,validation}/
+  tests/client/{components,hooks,lib}/   tests/helpers/
+```
+- **TST.UNIQUE-UUID** — Every integration file uses its **own** UUID suffixes for acting/target
+  users; files run in parallel and shared ids collide.
+- **TST.SETUP-HELPER** — Use `setupIntegrationUsers` + the `x-test-user-id` header to simulate
+  login, and `assignRole`/`assignSubscription` to arrange the caller. Don't hand-roll the login
+  flow.
+- **TST.NAME** — Name tests `METHOD /route — <condition> — <outcome>` for HTTP, or
+  `fn — <condition> — <outcome>` for units.
+```
+  POST /api/deals/:id/offers — basic subscriber — returns 201
+  submitOffer — unknown deal — throws 404
+  formatCompanyName — strips trailing entity suffix
+```
+- **TST.FIRST** — F.I.R.S.T.: Fast, Independent, Repeatable, Self-validating, Timely (the `/smell`
+  CC.T9 lens). No ordering dependencies between tests.
+
+---
+
+## Running
+
+| Command | Scope |
+|---|---|
+| `npm run test` | unit only (node env; excludes `*.integration.test.ts`) |
+| `npm run test:watch` | unit, watch mode |
+| `npm run test:integration` | integration only (needs `docker compose up -d` + `.env.test` → local Postgres) |
+| `npm run test:all` | unit + integration, sequential |
+| `npx vitest run <path>` | a single file |
+
+- **TST.RUN-LAYER** — Run the layer you changed: units with `npm run test`, route/service changes
+  with `npm run test:integration`, both with `npm run test:all`.
+- **TST.COVERAGE-BACKSTOP** — Coverage measurement is optional and advisory (`@vitest/coverage-v8`,
+  not yet installed). Treat a sudden drop as a smoke alarm for an untested path, not a target;
+  exclude `*.routes.ts`, `database/schemas/**`, and generated types.
+
+> **Tooling to install for the new layers:** component/hook — `@testing-library/react`,
+> `@testing-library/user-event`, `@testing-library/jest-dom`, `jsdom` (or `happy-dom`), plus a
+> jsdom Vitest project + `tests/client/setup.ts`.
+
+---
+
+## Maintenance
+
+- **TST.MAINT** — When a route, service, validator, or util changes: update the canonical doc
+  first (`access-control.md` / `api.md` / `database.md`), then bring its tests up to this standard.
+  A changed behavior with no test is a blocker, not a follow-up.
+- **TST.DELETE-CRITERION** — If a test's failure would be resolved by **updating the assertion**
+  rather than fixing code, the test is implementation-coupled — delete it or rewrite it against
+  behavior. Apply this opportunistically whenever a test annoys you during unrelated work; no
+  suite-wide audit required. Test count is not an asset; a test earns its place by failing only
+  when behavior is actually wrong.

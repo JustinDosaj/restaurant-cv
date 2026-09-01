@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Model weights (auto-downloaded or trained — too big for git)
+*.pt
+models/*
+!models/.gitkeep
+
+# Footage and results
+videos/*
+!videos/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Training data and runs (Roboflow is the source of truth)
+training/datasets/*
+!training/datasets/.gitkeep
+training/runs/*
+!training/runs/.gitkeep
