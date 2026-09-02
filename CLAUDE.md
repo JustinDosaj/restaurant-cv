@@ -42,6 +42,35 @@ Roughly in order, each building on the data layer:
 4. **Table states** — empty / seated / eating / ready for check / ready to be cleaned. First custom-trained models, annotated in Roboflow from footage collected by earlier versions.
 5. **Wait-time estimation and crowdedness insights** for the front of house.
 
+## Repository Layout
+
+The repo splits into the three concerns that will grow independently: **running models** (inference), **drawing** (annotation), and **training**.
+
+```
+restaurant-cv/
+├── run.py                  # CLI entry point — thin, just argument parsing
+├── restaurant_cv/          # the package: all real logic lives here
+│   ├── detect.py           #   inference: loads YOLO, runs detect/track (PersonTracker)
+│   ├── annotate.py         #   drawing: supervision boxes/labels/traces (FrameAnnotator)
+│   └── pipeline.py         #   glue: video in → track → draw → video out
+├── videos/                 # INPUT: drop camera footage here (gitignored)
+├── outputs/                # OUTPUT: annotated videos/images (gitignored)
+├── models/                 # custom-trained .pt weights, once we have them
+├── configs/                # per-camera table-zone polygons (v1 step 2)
+├── training/               # everything model-training related
+│   ├── datasets/           #   Roboflow exports (YOLO format)
+│   └── runs/               #   Ultralytics training runs / checkpoints
+└── requirements.txt        # deps (installed into .venv/)
+```
+
+### Conventions
+
+- **`run.py` stays thin.** New capabilities (zones, occupancy) become modules in `restaurant_cv/` that `pipeline.py` calls — e.g. the next one will be `zones.py` doing point-in-polygon on each detection's foot point, and after that an `occupancy.py` emitting the periodic records.
+- **`detect.py` is the only file that knows Ultralytics exists.** Everything downstream works with `supervision.Detections`, so swapping in custom weights later touches one file.
+- **`annotate.py` owns all drawing.** The pipeline and CLI never touch supervision annotator setup.
+- **Inference code never lives in `training/`, and vice versa.** Training's only output that inference sees is a `.pt` file dropped into `models/`.
+- **Data directories are gitignored, kept present via `.gitkeep`** (`videos/`, `outputs/`, `training/datasets/`, `training/runs/`).
+
 ## Key Technical Decisions
 
 - **Stack:** Ultralytics (YOLO + built-in ByteTrack/BoT-SORT tracking) and Roboflow (annotation + dataset management, used starting at the table-states stage). Chosen for existing familiarity — fastest path to a working version.
